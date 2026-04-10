@@ -2,7 +2,6 @@
 #
 # /// script
 # dependencies = [
-#   "coloredlogs",
 #   "docker",
 #   "pyyaml",
 #   "questionary",
@@ -21,16 +20,14 @@ import shlex
 import signal
 import subprocess
 import sys
-import threading
-import time
 import tomllib
 
-import coloredlogs
 import docker
 import questionary
 import tomli_w
 import yaml
 from rich.console import Console
+from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
     Progress,
@@ -49,7 +46,7 @@ CUSTOM_STYLE = questionary.Style(
         ("selected", "noinherit bold italic fg:#FF9D00"),
     ]
 )
-PATH = pathlib.Path(f"{os.environ['HOME']}/.local/share/kas-builder/")
+PATH = pathlib.Path(f"{os.environ['HOME']}/.local/share/kasctl/")
 TASK_PROGRESS_RE = re.compile(r"NOTE: Running task (\d+) of (\d+)")
 
 PATH.mkdir(parents=True, exist_ok=True)
@@ -67,7 +64,7 @@ def __yaml_str_representer__(dumper, data):
     return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
 
-def get_all_branches(name: str, url: str):
+def fetch_all_branches(name: str, url: str):
     command = f"git ls-remote -h {url}"
     with CONSOLE.status(
         f"[bold italic]fetching branches from [#FF9D00]{name}",
@@ -83,7 +80,7 @@ def get_all_branches(name: str, url: str):
     return list(filter(None, branches))
 
 
-def get_default_branch(name: str, url: str):
+def fetch_default_branch(name: str, url: str):
     command = f"git ls-remote --symref {url} HEAD"
     with CONSOLE.status(
         f"[bold italic]fetching default branch for [#FF9D00]{name}",
@@ -103,6 +100,8 @@ def get_default_branch(name: str, url: str):
 
 
 def get_distro(distros: list[str]):
+    if len(distros) == 1:
+        return distros.pop()
     distro = questionary.select(
         "select distro:",
         choices=distros,
@@ -112,14 +111,12 @@ def get_distro(distros: list[str]):
     raise KeyboardInterrupt()
 
 
-def get_kas_config(layer_settings: dict, layer_path: pathlib.Path | None):
-    logger.debug("using layer settings:\n%s", str(layer_settings))
-
-    name = layer_settings["layer"]["name"]
-    url = layer_settings["layer"]["url"]
+def get_kas_config(target_settings: dict, layer_path: pathlib.Path | None):
+    name = target_settings["layer"]["name"]
+    url = target_settings["layer"]["url"]
 
     config = dict()
-    config["distro"] = get_distro(layer_settings["distros"])
+    config["distro"] = get_distro(target_settings["distros"])
     config["header"] = dict()
     config["header"]["version"] = 18
     config["header"]["includes"] = [
@@ -129,7 +126,7 @@ def get_kas_config(layer_settings: dict, layer_path: pathlib.Path | None):
         },
     ]
 
-    machines = layer_settings["machines"]
+    machines = target_settings["machines"]
     machine = get_machine(machines)
     config["machine"] = machine
     if machines[machine].get("includes"):
@@ -150,16 +147,16 @@ def get_kas_config(layer_settings: dict, layer_path: pathlib.Path | None):
         select_branch = questionary.confirm(f"select {name} branch", default=False).ask()
         if select_branch is None:
             raise KeyboardInterrupt()
-        branch = get_selected_branch(name, url) if select_branch else get_default_branch(name, url)
+        branch = get_selected_branch(name, url) if select_branch else fetch_default_branch(name, url)
 
         config["repos"][name] = dict()
         config["repos"][name]["url"] = url
         config["repos"][name]["branch"] = branch
-        config["repos"][name]["commit"] = get_latest_commit_from_branch(branch, url)
+        config["repos"][name]["commit"] = fetch_latest_commit_from_branch(branch, url)
 
-    config["target"] = get_target(layer_settings["targets"])
+    config["target"] = get_target(target_settings["targets"])
 
-    repos = layer_settings.get("repos")
+    repos = target_settings.get("repos")
 
     if repos:
         branches_variable = list()
@@ -172,7 +169,7 @@ def get_kas_config(layer_settings: dict, layer_path: pathlib.Path | None):
             if repo in selected_repos:
                 branch = select_branch(name, url)
             else:
-                branch = get_default_branch(name, url)
+                branch = fetch_default_branch(name, url)
             branches_variable.append(f'{variable} = "{branch}"')
 
         config["local_conf_header"] = dict()
@@ -192,7 +189,7 @@ def get_layer_path(name: str) -> pathlib.Path:
     raise KeyboardInterrupt()
 
 
-def get_latest_commit_from_branch(branch: str, url: str):
+def fetch_latest_commit_from_branch(branch: str, url: str):
     command = f"git ls-remote {url} refs/heads/{branch}"
     with CONSOLE.status(
         f"[bold italic]fetching latest commit from [#FF9D00]{branch}",
@@ -212,6 +209,8 @@ def get_latest_commit_from_branch(branch: str, url: str):
 
 
 def get_machine(machines: dict[str, dict[str, list[str]]]):
+    if len(machines.keys()) == 1:
+        return machines.keys().pop()
     machine = questionary.select(
         "select machine:",
         choices=machines.keys(),
@@ -222,8 +221,10 @@ def get_machine(machines: dict[str, dict[str, list[str]]]):
 
 
 def get_selected_branch(name: str, url: str):
-    branches = get_all_branches(name, url)
-    default_branch = get_default_branch(name, url)
+    branches = fetch_all_branches(name, url)
+    default_branch = fetch_default_branch(name, url)
+    if len(branches) == 1:
+        return branches.pop()
     selection = questionary.autocomplete(
         f"select {name} branch:",
         style=CUSTOM_STYLE,
@@ -238,6 +239,8 @@ def get_selected_branch(name: str, url: str):
 
 # TODO: proper type annotations
 def get_selected_repos(repos: dict):
+    if len(repos.keys()) == 1:
+        return repos.keys().pop()
     selected_repos = questionary.checkbox(
         "select repos:",
         choices=[questionary.Choice(x, checked=True) for x in repos.keys()],
@@ -250,6 +253,8 @@ def get_selected_repos(repos: dict):
 
 
 def get_target(targets: list[str]):
+    if len(targets) == 1:
+        return targets.pop()
     target = questionary.select(
         "select target:",
         choices=targets,
@@ -261,19 +266,15 @@ def get_target(targets: list[str]):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("layer")
+    parser.add_argument("target")
     parser.add_argument("--print", action="store_true", help="print stored settings")
     parser.add_argument("--clear", action="store_true", help="clear stored settings")
     parser.add_argument("--local", action="store_true", help="use local repository")
-    parser.add_argument("-v", action="store_true", help="info level logging")
-    parser.add_argument("-vv", action="store_true", help="debug level logging")
-    parser.add_argument("-vvv", action="store_true", help="trace level logging")
+    parser.add_argument("-v", action="store_true", help="debug level logging")
     args = parser.parse_args()
 
-    coloredlogs.install(
-        level=logging.DEBUG if args.vvv or args.vv else logging.INFO if args.v else logging.WARNING,
-        logger=logger,
-    )
+    logger.addHandler(RichHandler())
+    logger.setLevel(logging.DEBUG if args.v else logging.INFO)
 
     yaml.add_representer(str, __yaml_str_representer__)
     yaml.add_representer(dict, __yaml_dict_representer__)
@@ -282,7 +283,7 @@ def main():
 
     if args.print:
         try:
-            with (PATH / f"{args.layer}.yaml").open() as f:
+            with (PATH / f"{args.target}.yaml").open() as f:
                 kas_config = yaml.safe_load(f)
             print(yaml.safe_dump(kas_config, indent=4))
             sys.exit(0)
@@ -290,53 +291,56 @@ def main():
             sys.exit(1)
 
     if args.clear:
-        (PATH / f"{args.layer}.yaml").unlink(missing_ok=True)
+        (PATH / f"{args.target}.yaml").unlink(missing_ok=True)
 
     try:
         with (PATH / "settings.toml").open("rb") as f:
-            kas_builder_settings = tomllib.load(f)
+            kasctl_settings = tomllib.load(f)
 
-        if args.layer not in kas_builder_settings or kas_builder_settings[args.layer].get("path") is None:
+        if args.target not in kasctl_settings or kasctl_settings[args.target].get("path") is None:
             raise FileNotFoundError()
         else:
-            layer_path = pathlib.Path(kas_builder_settings[args.layer]["path"])
+            meta_layer_path = pathlib.Path(kasctl_settings[args.target]["path"])
     except FileNotFoundError:
-        layer_path = get_layer_path(args.layer)
-        kas_builder_settings = dict()
-        kas_builder_settings[args.layer] = dict()
-        kas_builder_settings[args.layer]["path"] = str(layer_path)
+        meta_layer_path = get_layer_path(args.target)
+        kasctl_settings = dict()
+        kasctl_settings[args.target] = dict()
+        kasctl_settings[args.target]["path"] = str(meta_layer_path)
+
+    logger.debug("loaded kasctl settings:\n%s", str(kasctl_settings))
 
     try:
-        with (layer_path / "kas" / ".settings.toml").open("rb") as f:
-            layer_settings = tomllib.load(f)
+        with (meta_layer_path / "kas" / ".kasctl.toml").open("rb") as f:
+            meta_layer_settings = tomllib.load(f)
     except FileNotFoundError:
-        logger.error("TODO: proper error message for missing layer settings.toml")
+        logger.error("missing .kasctl.toml inside %s directory", str(meta_layer_path / "kas" / ".kasctl.toml"))
         sys.exit(1)
 
+    logger.debug("loaded meta-layer settings:\n%s", str(meta_layer_settings))
+
     try:
-        with (PATH / f"{args.layer}.yaml").open() as f:
+        with (PATH / f"{args.target}.yaml").open() as f:
             kas_config = yaml.safe_load(f)
-            questionary.print(f"stored {args.layer} configuration:\n", style="bold", end="")
-            questionary.print(yaml.dump(kas_config, indent=4), style="italic fg:#FF9D00")
-        reuse = questionary.confirm("build image using stored configuration").ask()
-        if reuse is None:
+            logger.info("loaded kas config:\n%s", str(kas_config))
+        reuse_kas_config = questionary.confirm("use loaded kas config").ask()
+        if reuse_kas_config is None:
             raise KeyboardInterrupt()
-        if not reuse:
-            kas_config = kas_config | get_kas_config(layer_settings, layer_path if args.local else None)
+        if not reuse_kas_config:
+            kas_config = kas_config | get_kas_config(meta_layer_settings, meta_layer_path if args.local else None)
     except FileNotFoundError:
-        kas_config = get_kas_config(layer_settings, layer_path if args.local else None)
+        kas_config = get_kas_config(meta_layer_settings, meta_layer_path if args.local else None)
+
+    logger.debug("building %s with kas config:\n%s", kas_config["target"], str(kas_config))
 
     with (PATH / "settings.toml").open("wb") as f:
-        tomli_w.dump(kas_builder_settings, f)
+        tomli_w.dump(kasctl_settings, f)
 
-    (PATH / f"{args.layer}.yaml").write_text(yaml.dump(kas_config, indent=4, default_flow_style=False))
+    (PATH / f"{args.target}.yaml").write_text(yaml.dump(kas_config, indent=4, default_flow_style=False))
 
     command = "uv run kas build"
-    logger.info("executing command '%s'", command)
+    logger.debug("executing command '%s'", command)
 
     client = docker.from_env()
-
-    user = f"{os.getuid()}:{os.getgid()}"
 
     ssh_known_hosts = pathlib.Path(os.environ.get("SSH_FOLDER", os.path.expanduser("~/.ssh"))) / "known_hosts"
     ssh_auth_sock = os.environ.get("SSH_AUTH_SOCK")
@@ -349,20 +353,19 @@ def main():
     try:
         container = client.containers.run(
             init=True,
-            name=args.layer,
-            image=args.layer,
+            name=args.target,
+            image=args.target,
             command=["/bin/bash", "-c", f"exec {command}"],
             environment={"SSH_AUTH_SOCK": "/ssh-agent"},
             volumes=[
                 f"{str(ssh_known_hosts)}:/home/kas/.ssh/known_hosts:ro",
                 f"{ssh_auth_sock}:/ssh-agent:ro",
-                f"{str(layer_path)}:/home/kas/{args.layer}:z",
-                f"{str(PATH / f'{args.layer}.yaml')}:/home/kas/{args.layer}/kas/yocto/.config.yaml:ro",
+                f"{str(meta_layer_path)}:/home/kas/{args.target}:z",
+                f"{str(PATH / f'{args.target}.yaml')}:/home/kas/{args.target}/kas/yocto/.config.yaml:ro",
             ],
-            user=user,
             detach=True,
             stop_signal="SIGINT",
-            working_dir=f"/home/kas/{args.layer}/kas/yocto",
+            working_dir=f"/home/kas/{args.target}/kas/yocto",
         )
 
         shutting_down = False
@@ -374,7 +377,7 @@ def main():
                 container.kill()
                 return
             shutting_down = True
-            logger.info("graceful shutdown requested, waiting for bitbake to finish...")
+            logger.debug("graceful shutdown requested, waiting for bitbake to finish...")
             result = subprocess.run(
                 ["bash", "-c", "pgrep -f 'bin/bitbake -c build'"],
                 capture_output=True,
@@ -382,7 +385,7 @@ def main():
             )
             pid = result.stdout.strip()
             if pid:
-                logger.info("sending SIGTERM to bitbake (pid %s)", pid)
+                logger.debug("sending SIGTERM to bitbake (pid %s)", pid)
                 os.kill(int(pid), signal.SIGINT)
             else:
                 logger.warning("bitbake process not found, killing container")
@@ -468,51 +471,53 @@ def main():
         sys.exit(status["StatusCode"] if status else 1)
 
     if "qemuarm" in kas_config["machine"]:
-        serial_port = 4321
+        run_qemu = questionary.confirm(f"run {kas_config['target']} inside qemu").ask()
+        if run_qemu is None:
+            raise KeyboardInterrupt()
+        if run_qemu:
+            addr = "127.0.01:4321"
 
-        CONSOLE.print(
-            f"[bold]to create a serial console run: "
-            f"[italic #FF9D00]socat pty,link=/tmp/vserial0,raw,echo=0, TCP:127.0.0.1:{serial_port} &"
-        )
+            CONSOLE.print(
+                f"[bold]to create a serial console run: "
+                f"[italic #FF9D00]socat pty,link=/tmp/vserial0,raw,echo=0, TCP:{addr} &"
+            )
 
-        subprocess.run(
-            [
-                "docker",
-                "run",
-                "--network=host",
-                "--privileged",
-                "--rm",
-                "--user",
-                user,
-                "-it",
-                "-e",
-                "SSH_AUTH_SOCK=/ssh-agent",
-                "-v",
-                "/dev/bus/usb:/dev/bus/usb",
-                "-v",
-                f"{str(ssh_known_hosts)}:/home/kas/.ssh/known_hosts:ro",
-                "-v",
-                f"{ssh_auth_sock}:/ssh-agent:ro",
-                "-v",
-                f"{str(layer_path)}:/home/kas/{args.layer}:z",
-                "-v",
-                f"{str(PATH / f'{args.layer}.yaml')}:/home/kas/{args.layer}/kas/yocto/.config.yaml:ro",
-                "-v",
-                "/tmp:/tmp",
-                "-w",
-                f"/home/kas/{args.layer}/kas/yocto",
-                args.layer,
-                "uv",
-                "run",
-                "kas",
-                "shell",
-                "-c",
-                f'runqemu nonetwork qemuparams="-display none -monitor stdio -serial tcp:127.0.0.1:{serial_port},server,nowait '
-                f"-netdev tap,id=net0,ifname=tap0,script=no,downscript=no "
-                f"-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:02 "
-                f'-device usb-host,vendorid=0x2c7c,productid=0x6002,bus=usb-bus.0,id=modem"',
-            ],
-        )
+            subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--network=host",
+                    "--privileged",
+                    "--rm",
+                    "-it",
+                    "-e",
+                    "SSH_AUTH_SOCK=/ssh-agent",
+                    "-v",
+                    "/dev/bus/usb:/dev/bus/usb",
+                    "-v",
+                    f"{str(ssh_known_hosts)}:/home/kas/.ssh/known_hosts:ro",
+                    "-v",
+                    f"{ssh_auth_sock}:/ssh-agent:ro",
+                    "-v",
+                    f"{str(meta_layer_path)}:/home/kas/{args.target}:z",
+                    "-v",
+                    f"{str(PATH / f'{args.target}.yaml')}:/home/kas/{args.target}/kas/yocto/.config.yaml:ro",
+                    "-v",
+                    "/tmp:/tmp",
+                    "-w",
+                    f"/home/kas/{args.target}/kas/yocto",
+                    args.target,
+                    "uv",
+                    "run",
+                    "kas",
+                    "shell",
+                    "-c",
+                    f'runqemu nonetwork qemuparams="-display none -monitor stdio -serial tcp:{addr},server,nowait '
+                    "-netdev tap,id=net0,ifname=tap0,script=no,downscript=no "
+                    "-device virtio-net-device,netdev=net0,mac=52:54:00:12:34:02 "
+                    '-device usb-host,vendorid=0x2c7c,productid=0x6002,bus=usb-bus.0,id=modem"',
+                ],
+            )
 
     sys.exit(0)
 
