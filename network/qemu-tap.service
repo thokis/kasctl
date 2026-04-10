@@ -1,0 +1,15 @@
+[Unit]
+Description=Create tap0 for QEMU
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ip tuntap add dev tap0 mode tap
+ExecStart=/usr/sbin/ip link set tap0 master br0
+ExecStart=/usr/sbin/ip link set tap0 up
+ExecStop=/usr/sbin/ip link set tap0 down
+ExecStop=/usr/sbin/ip tuntap del dev tap0 mode tap
+
+[Install]
+WantedBy=multi-user.target

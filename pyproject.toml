@@ -1,0 +1,25 @@
+[project]
+name = "kasctl"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "coloredlogs",
+    "docker",
+    "pyyaml",
+    "questionary",
+    "rich",
+    "tomli-w",
+]
+
+[tool.basedpyright]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+
+[tool.ruff]
+line-length = 120
+
+[tool.flake8]
+ignore = ["E203", "W503"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

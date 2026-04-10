@@ -1,0 +1,9 @@
+network:
+    version: 2
+    ethernets:
+        { { iface } }:
+            dhcp4: false
+    bridges:
+        br0:
+            interfaces: [{ { iface } }]
+            dhcp4: true
